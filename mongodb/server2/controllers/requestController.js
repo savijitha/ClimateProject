@@ -1,8 +1,19 @@
 // E:\ClimateProject\mongodb\server\controllers\requestController.js
 
 const Request = require('../models/Request');
+const Seed = require('../models/Seed'); // <-- You need to import the Seed model
 const nodemailer = require('nodemailer');
+const mongoose = require('mongoose');
 require('dotenv').config({ path: '../../config.env' });
+
+// Define the transporter once at the top of the file for efficiency
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
+    }
+});
 
 exports.createRequest = async (req, res) => {
     const { requesterId, requesterEmail, seedId, seedOwnerEmail, status } = req.body;
@@ -10,6 +21,17 @@ exports.createRequest = async (req, res) => {
         if (!requesterId || !requesterEmail || !seedId || !seedOwnerEmail) {
             return res.status(400).json({ message: 'Missing required fields: requesterId, requesterEmail, seedId, seedOwnerEmail.' });
         }
+        
+        // Add this line to validate the ObjectId format
+        if (!mongoose.Types.ObjectId.isValid(seedId)) {
+            return res.status(400).json({ message: 'Invalid seed ID format.' });
+        }
+
+        const seed = await Seed.findById(seedId);
+        if (!seed) {
+            return res.status(404).json({ message: 'Seed not found.' });
+        }
+
 
         const newRequest = new Request({
             requesterId,
@@ -20,12 +42,25 @@ exports.createRequest = async (req, res) => {
         });
 
         await newRequest.save();
-        res.status(201).json({ message: 'Request created successfully', request: newRequest });
+
+        // 2. Send email to the seed owner
+        const mailOptionsToOwner = {
+            from: process.env.EMAIL_USER,
+            to: seedOwnerEmail,
+            subject: `New Request for Your Seed: ${seed.seedName}`,
+            text: `Hello,\n\nA new request has been made for your seed listing, "${seed.seedName}".\n\nThe requester's email is: ${requesterEmail}.\n\nPlease log in to your dashboard to view and manage this request.\n\nThank you,\nClimate-Smart Agriculture Platform`
+        };
+        await transporter.sendMail(mailOptionsToOwner);
+        console.log(`Notification email sent to seed owner ${seedOwnerEmail} for new request.`);
+
+        res.status(201).json({ message: 'Request created successfully and owner has been notified.', request: newRequest });
     } catch (error) {
-        console.error('Error creating request:', error);
+        console.error('Error creating request or sending email:', error);
         res.status(500).json({ error: 'Failed to create request', details: error.message });
     }
 };
+
+// ... the rest of your controller functions (getAllRequests, getRequestById, etc.)
 
 exports.getAllRequests = async (req, res) => {
     const { ownerEmail } = req.query;
@@ -68,56 +103,35 @@ exports.updateRequestStatus = async (req, res) => {
 
     try {
         const request = await Request.findByIdAndUpdate(
-            id, 
-            { status }, 
+            id,
+            { status },
             { new: true }
         )
-        .populate('seedId', 'seedName seedType')
-        .populate('requesterId', 'username email'); // This line is crucial for populating the data
+            .populate('seedId', 'seedName seedType')
+            .populate('requesterId', 'username email');
 
         if (!request) {
             return res.status(404).json({ error: 'Request not found' });
         }
 
-        // The rest of your code remains the same.
-        // It can now correctly access request.requesterId.email
-        // and other populated properties.
-
+        let subject, text;
         if (status === 'granted') {
-            const transporter = nodemailer.createTransport({
-                service: 'gmail',
-                auth: {
-                    user: process.env.EMAIL_USER,
-                    pass: process.env.EMAIL_PASS
-                }
-            });
-
-            const mailOptions = {
-                from: process.env.EMAIL_USER,
-                to: request.requesterId.email, // Use the populated email
-                subject: 'Your Seed Request Has Been Granted!',
-                text: `Dear ${request.requesterId.username},\n\nYour request for the seed (ID: ${request.seedId._id}) has been granted! Please contact the seed owner (${request.seedOwnerEmail}) for further arrangements.\n\nRequest ID: ${request._id}\n\nBest regards,\nClimate-Smart Agriculture Platform`
-            };
-
-            await transporter.sendMail(mailOptions);
-            console.log(`Email sent to ${request.requesterId.email} for granted request ${request._id}`);
+            subject = 'Your Seed Request Has Been Granted!';
+            text = `Dear ${request.requesterId.username},\n\nYour request for the seed "${request.seedId.seedName}" has been granted! Please contact the seed owner (${request.seedOwnerEmail}) for further arrangements.\n\nRequest ID: ${request._id}\n\nBest regards,\nClimate-Smart Agriculture Platform`;
         } else if (status === 'declined') {
-            const transporter = nodemailer.createTransport({
-                service: 'gmail',
-                auth: {
-                    user: process.env.EMAIL_USER,
-                    pass: process.env.EMAIL_PASS
-                }
-            });
+            subject = 'Your Seed Request Status';
+            text = `Dear ${request.requesterId.username},\n\nYour request for the seed "${request.seedId.seedName}" has been declined. \n\nRequest ID: ${request._id}\n\nBest regards,\nClimate-Smart Agriculture Platform`;
+        }
 
-            const mailOptions = {
+        if (subject && text) {
+            const mailOptionsToRequester = {
                 from: process.env.EMAIL_USER,
-                to: request.requesterId.email, // Use the populated email
-                subject: 'Your Seed Request Status',
-                text: `Dear ${request.requesterId.username},\n\nYour request for the seed (ID: ${request.seedId._id}) has been declined. \n\nRequest ID: ${request._id}\n\nBest regards,\nClimate-Smart Agriculture Platform`
+                to: request.requesterId.email,
+                subject: subject,
+                text: text
             };
-            await transporter.sendMail(mailOptions);
-            console.log(`Email sent to ${request.requesterId.email} for declined request ${request._id}`);
+            await transporter.sendMail(mailOptionsToRequester);
+            console.log(`Email sent to ${request.requesterId.email} for status update on request ${request._id}`);
         }
 
         res.status(200).json({ message: `Request status updated to ${status}`, request });
